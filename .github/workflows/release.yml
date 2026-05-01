@@ -1,0 +1,42 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    container: pspdev/pspdev:latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Fix git permissions
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Compile
+        run: |
+          make clean
+          make
+
+      - name: Package Release
+        run: |
+          # Get tag name
+          TAG_NAME=${GITHUB_REF#refs/tags/}
+          # Setup folder structure
+          mkdir -p release/PSP/GAME/Forms3D
+          cp EBOOT.PBP release/PSP/GAME/Forms3D/
+          cp -r assets release/PSP/GAME/Forms3D/
+          # Create zip
+          cd release
+          zip -r ../Forms3D-PSP-${TAG_NAME}.zip .
+          cd ..
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Forms3D-PSP-*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
