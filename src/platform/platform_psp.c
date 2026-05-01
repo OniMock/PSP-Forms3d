@@ -15,9 +15,14 @@
  *
  * Frame lifecycle:
  *   psp_gu_clear()   → sceGuStart() + sceGuClear()      (opens the display
- * list) psp_gu_draw_*()  → sceGuDrawArray()                  (appends
- * primitives) psp_gu_present() → sceGuFinish() + sync + swap       (submits and
- * flips)
+ * list) psp_gu_draw_*()  → append to g_vbuf (no GU call yet)
+ *   psp_gu_present() → sceGuDrawArray() once per type, finish, sync, swap
+ *
+ * KEY FIX: We never call sceGuDrawArray inside draw_line/draw_triangle/
+ * draw_pixel because the GU processes the list asynchronously. Instead,
+ * vertices are accumulated in a large per-frame buffer and submitted all
+ * at once in present(). This eliminates the CPU/GU data race that caused
+ * rendering artifacts (streak lines, corrupted text) on real hardware.
  */
 
 #include "platform/renderer_backend.h"
@@ -32,12 +37,12 @@
 #include <string.h>
 
 /* ---- VRAM layout ---- */
-#define PSP_BUF_WIDTH 512
-#define PSP_SCR_WIDTH 480
+#define PSP_BUF_WIDTH  512
+#define PSP_SCR_WIDTH  480
 #define PSP_SCR_HEIGHT 272
-#define FRAME_BYTES (PSP_BUF_WIDTH * PSP_SCR_HEIGHT * 4) /* 32-bit colour */
-#define VRAM_DRAW_BUF ((void *)0x00000000)
-#define VRAM_DISP_BUF ((void *)FRAME_BYTES)
+#define FRAME_BYTES    (PSP_BUF_WIDTH * PSP_SCR_HEIGHT * 4) /* 32-bit colour */
+#define VRAM_DRAW_BUF  ((void *)0x00000000)
+#define VRAM_DISP_BUF  ((void *)FRAME_BYTES)
 #define VRAM_DEPTH_BUF ((void *)(FRAME_BYTES * 2)) /* 16-bit depth */
 
 /* Display list — 1 MB, DWORD-aligned in uncached RAM */
@@ -51,10 +56,28 @@ typedef struct {
   float x, y, z;
 } __attribute__((aligned(16))) Vert2D;
 
-/* Small scratch buffers for per-primitive vertices.
-   A single triangle = 3 verts, line = 2, pixel = 1. */
-#define MAX_DRAW_VERTS 3
-static Vert2D __attribute__((aligned(64))) g_vbuf[MAX_DRAW_VERTS];
+/*
+ * Large per-frame vertex accumulation buffer.
+ * Worst case: sphere solid = ~200 faces * 3 verts = 600 triangles vertices
+ *           + wireframe edges = ~250 * 2 = 500 line vertices
+ *           + text pixels = lines * chars * 8*8 = ~1000 point vertices
+ * We split into three sub-buffers (triangles, lines, points) that are
+ * flushed in present() with a single draw call each.
+ *
+ * MAX chosen conservatively for PSP 1000 (24 MB RAM):
+ *   3 * 2048 * 16 bytes = 96 KB — well within safe limits.
+ */
+#define MAX_TRI_VERTS   2048  /* triangles: multiple of 3 */
+#define MAX_LINE_VERTS  2048  /* lines: multiple of 2    */
+#define MAX_POINT_VERTS 4096  /* pixels for text          */
+
+static Vert2D __attribute__((aligned(64))) g_tri_buf[MAX_TRI_VERTS];
+static Vert2D __attribute__((aligned(64))) g_line_buf[MAX_LINE_VERTS];
+static Vert2D __attribute__((aligned(64))) g_pt_buf[MAX_POINT_VERTS];
+
+static int g_tri_count  = 0; /* in vertices, always multiple of 3 */
+static int g_line_count = 0; /* in vertices, always multiple of 2 */
+static int g_pt_count   = 0;
 
 /* ---- Init / Shutdown ---- */
 
@@ -112,16 +135,19 @@ static void psp_gu_shutdown(void) {
   g_initialized = false;
 }
 
-/* ---- Drawing primitives ---- */
+/* ---- Drawing primitives (CPU side only — no GU calls here) ---- */
 
 /*
- * clear() opens the display list for a new frame.
- * Every subsequent draw_* call appends to this open list.
- * present() closes and submits it.
+ * clear() opens the display list for a new frame AND resets the vertex
+ * accumulators. Every subsequent draw_* call appends to the CPU buffers.
+ * present() flushes those buffers to the GU in one batch.
  */
 static void psp_gu_clear(Color color) {
-  /* Our Color = R | G<<8 | B<<16 | A<<24 == GU_COLOR_8888 RGBA LE — same layout
-   */
+  /* Reset accumulators */
+  g_tri_count  = 0;
+  g_line_count = 0;
+  g_pt_count   = 0;
+
   sceGuStart(GU_DIRECT, g_dlist);
   sceGuClearColor(color);
   sceGuClearDepth(0);
@@ -129,37 +155,56 @@ static void psp_gu_clear(Color color) {
 }
 
 static void psp_gu_draw_line(int x1, int y1, int x2, int y2, Color color) {
-  g_vbuf[0] = (Vert2D){color, (float)x1, (float)y1, 0.0f};
-  g_vbuf[1] = (Vert2D){color, (float)x2, (float)y2, 0.0f};
-  sceKernelDcacheWritebackRange(g_vbuf, sizeof(Vert2D) * 2);
-  sceGuDrawArray(GU_LINES, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
-                 2, 0, g_vbuf);
+  if (g_line_count + 2 > MAX_LINE_VERTS)
+    return;
+  g_line_buf[g_line_count++] = (Vert2D){color, (float)x1, (float)y1, 0.0f};
+  g_line_buf[g_line_count++] = (Vert2D){color, (float)x2, (float)y2, 0.0f};
 }
 
-static void psp_gu_draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3,
-                                 Color color) {
-  g_vbuf[0] = (Vert2D){color, (float)x1, (float)y1, 0.0f};
-  g_vbuf[1] = (Vert2D){color, (float)x2, (float)y2, 0.0f};
-  g_vbuf[2] = (Vert2D){color, (float)x3, (float)y3, 0.0f};
-  sceKernelDcacheWritebackRange(g_vbuf, sizeof(Vert2D) * 3);
-  sceGuDrawArray(GU_TRIANGLES,
-                 GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D, 3, 0,
-                 g_vbuf);
+static void psp_gu_draw_triangle(int x1, int y1, int x2, int y2, int x3,
+                                 int y3, Color color) {
+  if (g_tri_count + 3 > MAX_TRI_VERTS)
+    return;
+  g_tri_buf[g_tri_count++] = (Vert2D){color, (float)x1, (float)y1, 0.0f};
+  g_tri_buf[g_tri_count++] = (Vert2D){color, (float)x2, (float)y2, 0.0f};
+  g_tri_buf[g_tri_count++] = (Vert2D){color, (float)x3, (float)y3, 0.0f};
 }
 
 static void psp_gu_draw_pixel(int x, int y, Color color) {
-  g_vbuf[0] = (Vert2D){color, (float)x, (float)y, 0.0f};
-  sceKernelDcacheWritebackRange(g_vbuf, sizeof(Vert2D));
-  sceGuDrawArray(GU_POINTS, GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
-                 1, 0, g_vbuf);
+  if (g_pt_count + 1 > MAX_POINT_VERTS)
+    return;
+  g_pt_buf[g_pt_count++] = (Vert2D){color, (float)x, (float)y, 0.0f};
 }
 
 static void psp_gu_present(void) {
+  /* Flush triangles */
+  if (g_tri_count > 0) {
+    sceKernelDcacheWritebackRange(g_tri_buf, sizeof(Vert2D) * g_tri_count);
+    sceGuDrawArray(GU_TRIANGLES,
+                   GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                   g_tri_count, 0, g_tri_buf);
+  }
+
+  /* Flush lines */
+  if (g_line_count > 0) {
+    sceKernelDcacheWritebackRange(g_line_buf, sizeof(Vert2D) * g_line_count);
+    sceGuDrawArray(GU_LINES,
+                   GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                   g_line_count, 0, g_line_buf);
+  }
+
+  /* Flush pixels (text) */
+  if (g_pt_count > 0) {
+    sceKernelDcacheWritebackRange(g_pt_buf, sizeof(Vert2D) * g_pt_count);
+    sceGuDrawArray(GU_POINTS,
+                   GU_COLOR_8888 | GU_VERTEX_32BITF | GU_TRANSFORM_2D,
+                   g_pt_count, 0, g_pt_buf);
+  }
+
   sceGuFinish();
   sceGuSync(0, 0);
   sceDisplayWaitVblankStart();
   sceGuSwapBuffers();
-  /* The next call to clear() will open the display list again */
 }
 
 /* ---- Input ---- */
@@ -192,8 +237,8 @@ static void psp_gu_poll_input(InputState *state) {
     current |= BN_SELECT;
 
   state->buttons_pressed = current & ~prev_buttons;
-  state->buttons_held = current;
-  prev_buttons = current;
+  state->buttons_held    = current;
+  prev_buttons           = current;
 }
 
 /* ---- Timing ---- */
@@ -210,23 +255,23 @@ static float psp_gu_get_time(void) {
   return (float)(now - start_tick) / (float)resolution;
 }
 
-static int psp_gu_get_width(void) { return PSP_SCR_WIDTH; }
+static int psp_gu_get_width(void)  { return PSP_SCR_WIDTH; }
 static int psp_gu_get_height(void) { return PSP_SCR_HEIGHT; }
 
 /* ---- Exported vtable ---- */
 
 const RendererBackend BACKEND_PSP_GU = {
-    .name = "PSP GU",
-    .init = psp_gu_init,
-    .init_audio = psp_gu_init_audio,
-    .shutdown = psp_gu_shutdown,
-    .clear = psp_gu_clear,
-    .draw_line = psp_gu_draw_line,
+    .name        = "PSP GU",
+    .init        = psp_gu_init,
+    .init_audio  = psp_gu_init_audio,
+    .shutdown    = psp_gu_shutdown,
+    .clear       = psp_gu_clear,
+    .draw_line   = psp_gu_draw_line,
     .draw_triangle = psp_gu_draw_triangle,
-    .draw_pixel = psp_gu_draw_pixel,
-    .present = psp_gu_present,
-    .poll_input = psp_gu_poll_input,
-    .get_time = psp_gu_get_time,
-    .get_width = psp_gu_get_width,
-    .get_height = psp_gu_get_height,
+    .draw_pixel  = psp_gu_draw_pixel,
+    .present     = psp_gu_present,
+    .poll_input  = psp_gu_poll_input,
+    .get_time    = psp_gu_get_time,
+    .get_width   = psp_gu_get_width,
+    .get_height  = psp_gu_get_height,
 };
