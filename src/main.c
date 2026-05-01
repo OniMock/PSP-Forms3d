@@ -16,6 +16,33 @@
 PSP_MODULE_INFO("Forms3d", 0, 1, 1);
 PSP_MAIN_THREAD_ATTR(THREAD_ATTR_USER | THREAD_ATTR_VFPU);
 
+/* ---- PSP Home-button exit callback ---- */
+static volatile bool g_running_flag = true;
+
+static int exit_callback(int arg1, int arg2, void *common) {
+  (void)arg1;
+  (void)arg2;
+  (void)common;
+  g_running_flag = false;
+  return 0;
+}
+
+static int callback_thread(SceSize args, void *argp) {
+  (void)args;
+  (void)argp;
+  int cbid = sceKernelCreateCallback("Exit Callback", exit_callback, NULL);
+  sceKernelRegisterExitCallback(cbid);
+  sceKernelSleepThreadCB(); /* sleep forever, wake on callback */
+  return 0;
+}
+
+static void setup_exit_callback(void) {
+  int thid = sceKernelCreateThread("callback_thread", callback_thread,
+                                   0x11, 0xFA0, 0, NULL);
+  if (thid >= 0)
+    sceKernelStartThread(thid, 0, NULL);
+}
+
 /* ---- Palette ---- */
 static Color g_colors[] = {
     COLOR_RGB(0, 255, 128),   /* Vibrant Green  */
@@ -63,7 +90,10 @@ static void switch_backends(bool to_psp_native) {
 }
 
 int main(int argc, char *argv[]) {
-  /* 0. Fast PSP boot splash */
+  /* 0. Register Home-button exit callback */
+  setup_exit_callback();
+
+  /* 1. Fast PSP boot splash */
   pspDebugScreenInit();
   pspDebugScreenPrintf(
       "\n\n\n\n\n\n\n\n              Forms3d Engine - Booting...");
@@ -123,6 +153,7 @@ int main(int argc, char *argv[]) {
 
   InputState input = {0};
   bool running = true;
+  g_running_flag = true; /* reset in case of re-entry */
 
   /* Trackball rotation state */
   Mat4 model_rot = mat4_identity();
@@ -141,7 +172,7 @@ int main(int argc, char *argv[]) {
   bool screensaver = true;
 
   /* ---- Main loop ---- */
-  while (running) {
+  while (running && g_running_flag) {
     float now = platform_get_time();
     float dt = now - last_frame_time;
     last_frame_time = now;

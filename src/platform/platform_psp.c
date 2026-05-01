@@ -65,11 +65,13 @@ typedef struct {
  * flushed in present() with a single draw call each.
  *
  * MAX chosen conservatively for PSP 1000 (24 MB RAM):
- *   3 * 2048 * 16 bytes = 96 KB — well within safe limits.
+ *   3 * 4096 * 16 bytes = 192 KB
+ *   + 16384 * 16 bytes = 256 KB
+ *   Total ~450 KB — well within safe limits for PSP 1000 (24 MB RAM).
  */
-#define MAX_TRI_VERTS   2048  /* triangles: multiple of 3 */
-#define MAX_LINE_VERTS  2048  /* lines: multiple of 2    */
-#define MAX_POINT_VERTS 4096  /* pixels for text          */
+#define MAX_TRI_VERTS   4096  /* triangles: multiple of 3 */
+#define MAX_LINE_VERTS  4096  /* lines: multiple of 2    */
+#define MAX_POINT_VERTS 16384 /* pixels for text (lots of strings) */
 
 static Vert2D __attribute__((aligned(64))) g_tri_buf[MAX_TRI_VERTS];
 static Vert2D __attribute__((aligned(64))) g_line_buf[MAX_LINE_VERTS];
