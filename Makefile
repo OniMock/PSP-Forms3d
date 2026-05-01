@@ -35,7 +35,7 @@ LDFLAGS =
 
 # EBOOT Metadata
 EXTRA_TARGETS   = EBOOT.PBP
-PSP_EBOOT_TITLE = Forms3d 3D
+PSP_EBOOT_TITLE = Forms 3D
 
 # Build Rules
 include $(PSPSDK)/lib/build.mak
