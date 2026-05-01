@@ -25,10 +25,10 @@ jobs:
         run: |
           # Get tag name
           TAG_NAME=${GITHUB_REF#refs/tags/}
-          # Setup folder structure
-          mkdir -p release/PSP/GAME/Forms3D
-          cp EBOOT.PBP release/PSP/GAME/Forms3D/
-          cp -r assets release/PSP/GAME/Forms3D/
+          # Setup folder structure: Forms3D/ at the root
+          mkdir -p release/Forms3D
+          cp EBOOT.PBP release/Forms3D/
+          cp -r assets release/Forms3D/
           # Create zip
           cd release
           zip -r ../Forms3D-PSP-${TAG_NAME}.zip .
@@ -38,5 +38,12 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: Forms3D-PSP-*.zip
+          body: |
+            ## How to install on PSP:
+            1. Download the `.zip` file below.
+            2. Extract the `Forms3D` folder.
+            3. Connect your PSP to your PC via USB.
+            4. Copy the `Forms3D` folder to your Memory Stick at: `/PSP/GAME/`.
+            5. On your PSP, go to **Game -> Memory Stick™** and launch **Forms 3D**.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
