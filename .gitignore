@@ -1,0 +1,36 @@
+# Compiled Object files
+*.o
+*.obj
+
+# PSP specific artifacts
+*.elf
+*.PBP
+*.SFO
+*.prx
+EBOOT.PBP
+PARAM.SFO
+
+# Executables
+*.exe
+*.out
+*.app
+Forms3d
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+
+# IDE and Project specific
+.vscode/
+.vs/
+.gemini/
+build/
+bin/
+obj/
+
+# OS specific
+.DS_Store
+Thumbs.db
+desktop.ini
