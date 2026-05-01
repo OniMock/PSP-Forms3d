@@ -23,6 +23,8 @@ jobs:
 
       - name: Package Release
         run: |
+          # Install zip as it is not pre-installed in the pspdev container
+          apt-get update && apt-get install -y zip
           # Get tag name
           TAG_NAME=${GITHUB_REF#refs/tags/}
           # Setup folder structure: Forms3D/ at the root
